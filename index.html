@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Slipstream — Crypto Lag Radar</title>
   <meta name="description" content="Finds crypto coins that trail the market leaders — detecting lead-lag patterns and ranking them by confidence." />
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="style.css?v=5" />
 </head>
 <body>
   <header class="topbar">
@@ -61,18 +61,32 @@
           <th>Match <span class="hint" title="Peak correlation of the coin's moves against the leader at the best lag">ⓘ</span></th>
           <th>Confidence <span class="hint" title="Rewards a sharp peak at a specific lag; penalizes coins that just co-move with everything">ⓘ</span></th>
           <th class="left">Lag profile</th>
+          <th>Chart</th>
         </tr>
       </thead>
       <tbody id="resultsBody">
-        <tr><td colspan="7" class="empty">Press <b>Scan now</b> to pull live data and hunt for laggards.</td></tr>
+        <tr><td colspan="8" class="empty">Press <b>Scan now</b> to pull live data and hunt for laggards.</td></tr>
       </tbody>
     </table>
   </main>
+
+  <div id="chartModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="modalTitle">Compare</h3>
+        <button id="modalClose" class="modal-close" title="Close">✕</button>
+      </div>
+      <div id="modalStats" class="modal-stats"></div>
+      <div id="modalChart" class="modal-chart"></div>
+      <label class="modal-align"><input type="checkbox" id="alignLag" checked /> Shift leader by the detected lag (should line up with the coin)</label>
+      <p class="modal-note">Both series are normalized to 100 at the start of the window so you can compare their shape. The faint solid line is the leader as-is; the dashed line is the leader shifted forward by the detected lag — if the lag is real, it hugs the coin's line.</p>
+    </div>
+  </div>
 
   <footer class="disclaimer">
     <p><b>This is a pattern-research tool, not financial advice.</b> Crypto is heavily correlated, and lead-lag relationships are unstable — a lag that shows up today often disappears tomorrow. Nothing here is a signal to trade on. Data from Coinbase's public API; correlations are computed live in your browser and stored nowhere.</p>
   </footer>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

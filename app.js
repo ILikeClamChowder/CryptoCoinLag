@@ -1,6 +1,7 @@
 /* Slipstream — Crypto Lag Radar
  * Finds coins that trail the market leaders (lead-lag cross-correlation).
- * Runs entirely in the browser. Data: Coinbase Exchange public API (no key, US-friendly, CORS-enabled).
+ * Runs entirely in the browser. Price data: Coinbase Exchange (fine granularity) + CoinGecko
+ * (one bulk call for volume ranking AND a fast 7-day hourly snapshot). No API key required.
  *
  * HOW IT WORKS
  *  1. Pull recent candles for each coin, convert closes -> per-candle % returns.
@@ -10,8 +11,8 @@
  *  3. Confidence rewards a SHARP peak at a specific, non-zero lag and punishes coins
  *     that just co-move with everything (a flat, high correlation curve = boring, not a lag).
  *
- * Results stream in live: rows appear and re-rank as each coin's data arrives, and each
- * timeframe's data is cached so switching back is instant.
+ * SPEED: the default "1-hour" view loads from a single CoinGecko call (7d hourly for ~250 coins),
+ * so it's near-instant. Finer timeframes stream from Coinbase. Everything is cached per timeframe.
  */
 
 // ------------------------------- CONFIG -------------------------------
@@ -20,32 +21,32 @@ const CONFIG = {
   quote: 'USD',
   leaders: ['BTC', 'ETH', 'SOL'],
 
-  // The universe is EVERY coin Coinbase lists against USD (fetched live), minus the
-  // stablecoins/fiat below (they'd just show 100% flat matches and add noise).
   exclude: new Set([
     'USDT', 'USDC', 'DAI', 'PYUSD', 'GUSD', 'USDP', 'PAX', 'BUSD', 'UST', 'USTC',
     'LUSD', 'USDD', 'EURC', 'EUROC', 'GYEN', 'RLUSD', 'WBTC', 'CBETH', 'CBBTC',
     'USD1', 'USDS', 'FDUSD', 'USDE', 'USDG', 'USDR', 'EURT', 'PAXG', 'XAUT',
   ]),
 
-  maxCoins: 120,      // scan the top-N most liquid coins (ranked by volume) — keeps scans fast
-  concurrency: 2,     // parallel candle fetches (Coinbase rate-limits bursts — keep this low)
-  pacingMs: 220,      // gap between each request within a worker (~8-9 req/s, under Coinbase's ~10/s)
+  maxCoins: 120,      // scan the top-N most liquid coins (ranked by volume)
+  concurrency: 2,     // parallel Coinbase candle fetches (it rate-limits bursts — keep low)
+  pacingMs: 220,      // gap between requests within a worker (~9 req/s, under Coinbase's ~10/s)
   minOverlap: 40,     // need at least this many aligned return points to trust a correlation
   reanalyzeMs: 450,   // how often to recompute+re-render while data is still streaming in
 
   timeframes: {
-    '5m':  { label: '5-min · ~1 day',    granularity: 300,   maxLagCandles: 36 }, // up to 3h lag
-    '15m': { label: '15-min · ~3 days',  granularity: 900,   maxLagCandles: 32 }, // up to 8h lag
-    '1h':  { label: '1-hour · ~12 days', granularity: 3600,  maxLagCandles: 24 }, // up to 1 day lag
-    '6h':  { label: '6-hour · ~75 days', granularity: 21600, maxLagCandles: 20 }, // up to 5 days lag
+    // The default is powered by one bulk CoinGecko call → loads almost instantly.
+    '1h':  { label: '1-hour · 7 days (fast)', source: 'gecko',    granularity: 3600,  maxLagCandles: 24 },
+    '5m':  { label: '5-min · ~1 day',         source: 'coinbase', granularity: 300,   maxLagCandles: 36 },
+    '15m': { label: '15-min · ~3 days',       source: 'coinbase', granularity: 900,   maxLagCandles: 32 },
+    '6h':  { label: '6-hour · ~75 days',      source: 'coinbase', granularity: 21600, maxLagCandles: 20 },
   },
 };
 
 // ------------------------------- STATE -------------------------------
 let AVAILABLE = null;             // Set of live base symbols on Coinbase (quote = USD)
+let MARKETS = null;               // cached CoinGecko /coins/markets response (ranking + sparklines)
 let ROWS = [];                    // last computed rows
-const CACHE = new Map();          // `${sym}|${granularity}` -> returns[]  (per-timeframe candle cache)
+const CACHE = new Map();          // `${sym}|${granularity}` -> { closes:[], returns:[] }
 let scanToken = 0;                // bumped on every new scan so stale streams stop touching the UI
 
 // ------------------------------- DOM -------------------------------
@@ -56,6 +57,8 @@ const el = {
   statusDot: $('statusDot'), statusText: $('statusText'),
   progress: $('progress'), progressFill: $('progressFill'), progressText: $('progressText'),
   body: $('resultsBody'),
+  modal: $('chartModal'), modalTitle: $('modalTitle'), modalStats: $('modalStats'),
+  modalChart: $('modalChart'), modalClose: $('modalClose'), alignLag: $('alignLag'),
 };
 
 // ------------------------------- MATH -------------------------------
@@ -68,8 +71,7 @@ function toReturns(closes) {
   return r;
 }
 
-// Pearson correlation of X[t] vs L[t-k], computed in place (no array allocation — fast enough
-// to recompute the full all-pairs grid many times per scan).
+// Pearson correlation of X[t] vs L[t-k], computed in place (no array allocation).
 function corrAtLag(rx, rl, k, minOverlap) {
   const n = Math.min(rx.length, rl.length);
   const m = n - k;
@@ -95,7 +97,6 @@ function lagCurve(rx, rl, maxLag) {
 /* Confidence: turn a lag curve into a 0-100 score.
  *  - strength : how high the peak correlation is (must clear a real bar)
  *  - sharpness: how far the peak stands above the average of the whole curve
- *               (a flat curve = generic co-movement, NOT a lag relationship)
  *  - lagFactor: a peak at lag 0 means "coincident", not "lagging" -> heavily discounted
  */
 function scoreCurve(curve) {
@@ -109,7 +110,7 @@ function scoreCurve(curve) {
   if (count === 0 || peakCorr <= 0) return { confidence: 0, peakCorr: 0, peakLag: 0 };
 
   const mean = sum / count;
-  const prominence = peakCorr - mean;              // sharpness of the peak
+  const prominence = peakCorr - mean;
   const strength = Math.min(1, peakCorr);
   const sharp = Math.min(1, Math.max(0, prominence / 0.30));
   const lagFactor = peakLag === 0 ? 0.35 : 1;
@@ -135,6 +136,12 @@ async function fetchJSON(url, tries = 3) {
   }
 }
 
+function cachePut(sym, granularity, closes) {
+  const entry = { closes, returns: toReturns(closes) };
+  CACHE.set(`${sym}|${granularity}`, entry);
+  return entry;
+}
+
 async function loadAvailable() {
   if (AVAILABLE) return AVAILABLE;
   const products = await fetchJSON(`${CONFIG.apiBase}/products`);
@@ -146,27 +153,30 @@ async function loadAvailable() {
   return AVAILABLE;
 }
 
-// One bulk CoinGecko call → coin symbols ordered by 24h trading volume (most liquid first).
-// Used only to PICK and ORDER the universe; all price data still comes from Coinbase.
-// Returns an ordered array of upper-case symbols, or null if unavailable (we then fall back).
-let RANKED = null;
-async function loadRanked() {
-  if (RANKED) return RANKED;
+// One bulk CoinGecko call: coins ordered by 24h volume, each with a 7-day hourly sparkline.
+async function loadMarkets() {
+  if (MARKETS) return MARKETS;
   try {
     const url = 'https://api.coingecko.com/api/v3/coins/markets'
-      + '?vs_currency=usd&order=volume_desc&per_page=250&page=1&sparkline=false';
+      + '?vs_currency=usd&order=volume_desc&per_page=250&page=1&sparkline=true';
     const data = await fetchJSON(url, 2);
-    if (!Array.isArray(data)) return null;
-    const seen = new Set();
-    RANKED = [];
-    for (const c of data) {
-      const s = (c.symbol || '').toUpperCase();
-      if (s && !seen.has(s)) { seen.add(s); RANKED.push(s); }
-    }
-    return RANKED;
+    MARKETS = Array.isArray(data) ? data : [];
   } catch {
-    return null;
+    MARKETS = [];
   }
+  return MARKETS;
+}
+
+// Volume-ranked list of upper-case symbols (for ordering the Coinbase universe), or null.
+async function loadRanked() {
+  const m = await loadMarkets();
+  if (!m.length) return null;
+  const seen = new Set(); const out = [];
+  for (const c of m) {
+    const s = (c.symbol || '').toUpperCase();
+    if (s && !seen.has(s)) { seen.add(s); out.push(s); }
+  }
+  return out;
 }
 
 // Returns closes[] ascending by time, or null on failure.
@@ -181,22 +191,22 @@ async function fetchCandles(symbol, granularity) {
   }
 }
 
-// Stream returns for a universe. onData(sym) fires as each coin lands; leaders are fetched first.
+// Stream returns for a universe from Coinbase. onData(sym) fires as each coin lands.
 async function streamUniverse(symbols, granularity, target, token, onData, onProgress) {
   let done = 0;
   const queue = symbols.slice();
   async function worker() {
     while (queue.length) {
-      if (token !== scanToken) return;         // a newer scan started — abandon this one
+      if (token !== scanToken) return;
       const sym = queue.shift();
       const key = `${sym}|${granularity}`;
-      let returns = CACHE.get(key);
-      if (!returns) {
+      let entry = CACHE.get(key);
+      if (!entry) {
         const closes = await fetchCandles(sym, granularity);
-        if (closes) { returns = toReturns(closes); CACHE.set(key, returns); }
+        if (closes) entry = cachePut(sym, granularity, closes);
       }
       if (token !== scanToken) return;
-      if (returns) { target.set(sym, returns); onData(sym); }
+      if (entry) { target.set(sym, entry.returns); onData(sym); }
       onProgress(++done, symbols.length, sym);
       if (queue.length && !CACHE.has(`${queue[0]}|${granularity}`)) await sleep(CONFIG.pacingMs);
     }
@@ -250,7 +260,7 @@ function fmtLag(candles, granularity) {
   const parts = [];
   if (h) parts.push(h + 'h');
   if (m) parts.push(m + 'm');
-  return parts.join(' ') + ' behind';
+  return (parts.join(' ') || '0m') + ' behind';
 }
 
 function confColor(v) {
@@ -288,7 +298,7 @@ function render() {
     .sort((a, b) => b.confidence - a.confidence);
 
   if (!rows.length) {
-    el.body.innerHTML = `<tr><td colspan="7" class="empty">No laggards cleared the ${minConf}% bar yet. Lower the filter or try another timeframe.</td></tr>`;
+    el.body.innerHTML = `<tr><td colspan="8" class="empty">No laggards cleared the ${minConf}% bar yet. Lower the filter or try another timeframe.</td></tr>`;
     return;
   }
 
@@ -305,18 +315,136 @@ function render() {
         <span class="conf-num" style="color:${c}">${r.confidence.toFixed(0)}%</span>
       </div></td>
       <td class="left">${sparkline(r.curve || [])}</td>
+      <td><button class="cmp" data-coin="${r.coin}" title="Compare ${r.coin} vs ${r.leader} side by side">⇋</button></td>
     </tr>`;
   }).join('');
 }
 
+// ------------------------------- COMPARE CHART (modal) -------------------------------
+let modalCtx = null; // { coin, leader, lag, granularity }
+
+function normalize(closes) {
+  const base = closes[0] || 1;
+  return closes.map((c) => (100 * c) / base);
+}
+
+// Build an SVG overlay of coin vs leader; optionally shift the leader by the detected lag.
+function buildCompareSVG(coinCloses, leaderCloses, lag, alignByLag) {
+  const w = 760, h = 340, padL = 46, padR = 16, padT = 16, padB = 30;
+  const n = Math.min(coinCloses.length, leaderCloses.length);
+  const coin = normalize(coinCloses.slice(-n));
+  const lead = normalize(leaderCloses.slice(-n));
+
+  // Series to plot: coin, leader, and (optionally) leader shifted right by `lag`.
+  const series = [
+    { vals: coin.map((v, i) => [i, v]), stroke: 'var(--accent)', width: 2, dash: '' },
+    { vals: lead.map((v, i) => [i, v]), stroke: 'var(--accent-2)', width: 1.6, dash: '', opacity: 0.45 },
+  ];
+  if (alignByLag && lag > 0) {
+    const shifted = [];
+    for (let i = lag; i < n; i++) shifted.push([i, lead[i - lag]]);
+    series.push({ vals: shifted, stroke: 'var(--accent-2)', width: 1.8, dash: '5 4', opacity: 0.95 });
+  }
+
+  let lo = Infinity, hi = -Infinity;
+  for (const s of series) for (const [, v] of s.vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const range = hi - lo || 1;
+  const X = (i) => padL + (i / (n - 1)) * (w - padL - padR);
+  const Y = (v) => padT + (1 - (v - lo) / range) * (h - padT - padB);
+
+  const gridY = [lo, lo + range / 2, hi].map((v) => {
+    const y = Y(v).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="var(--border)" stroke-width="1"/>
+      <text x="${padL - 6}" y="${(+y + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--muted)">${v.toFixed(0)}</text>`;
+  }).join('');
+
+  const paths = series.map((s) => {
+    const d = s.vals.map(([i, v], k) => `${k ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+    return `<path d="${d}" fill="none" stroke="${s.stroke}" stroke-width="${s.width}"
+      stroke-dasharray="${s.dash}" opacity="${s.opacity ?? 1}" stroke-linejoin="round"/>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" preserveAspectRatio="xMidYMid meet">
+    ${gridY}
+    <text x="${padL}" y="${h - 8}" font-size="10" fill="var(--muted)">← older</text>
+    <text x="${w - padR}" y="${h - 8}" font-size="10" fill="var(--muted)" text-anchor="end">newer →</text>
+    ${paths}
+  </svg>`;
+}
+
+function drawModal() {
+  if (!modalCtx) return;
+  const { coin, leader, lag, granularity, row } = modalCtx;
+  const c = CACHE.get(`${coin}|${granularity}`);
+  const l = CACHE.get(`${leader}|${granularity}`);
+  if (!c || !l) { el.modalChart.innerHTML = '<p class="empty">Price data unavailable — run a scan first.</p>'; return; }
+  el.modalChart.innerHTML = buildCompareSVG(c.closes, l.closes, lag, el.alignLag.checked);
+
+  const tf = CONFIG.timeframes[el.timeframe.value];
+  el.modalStats.innerHTML = `
+    <span><b style="color:var(--accent)">${coin}</b> follows <b style="color:var(--accent-2)">${leader}</b></span>
+    <span class="pill">${lag === 0 ? 'coincident' : fmtLag(lag, tf.granularity)}</span>
+    <span class="pill">match ${(row.peakCorr * 100).toFixed(0)}%</span>
+    <span class="pill">confidence ${row.confidence.toFixed(0)}%</span>`;
+}
+
+function openModal(row) {
+  const tf = CONFIG.timeframes[el.timeframe.value];
+  modalCtx = { coin: row.coin, leader: row.leader, lag: row.peakLag, granularity: tf.granularity, row };
+  el.modalTitle.textContent = `${row.coin} vs ${row.leader}`;
+  el.alignLag.checked = row.peakLag > 0;
+  drawModal();
+  el.modal.classList.remove('hidden');
+}
+
+function closeModal() { el.modal.classList.add('hidden'); modalCtx = null; }
+
 // ------------------------------- SCAN -------------------------------
-let scanning = false;
+// Fast path: build the whole field from the single bulk CoinGecko sparkline call.
+async function runGecko(tf, returns, token) {
+  el.progressText.textContent = 'Loading market data…';
+  el.progressFill.style.width = '25%';
+  const markets = await loadMarkets();
+  if (token !== scanToken) return true;
+  if (!markets.length) return false;
+
+  const seen = new Set();
+  for (const m of markets) {
+    const sym = (m.symbol || '').toUpperCase();
+    const prices = m.sparkline_in_7d && m.sparkline_in_7d.price;
+    if (!sym || seen.has(sym) || CONFIG.exclude.has(sym)) continue;
+    if (!Array.isArray(prices) || prices.length < CONFIG.minOverlap + 5) continue;
+    seen.add(sym);
+    const entry = cachePut(sym, tf.granularity, prices);
+    returns.set(sym, entry.returns);
+    if (returns.size >= CONFIG.maxCoins) break;
+  }
+  el.progressFill.style.width = '100%';
+  el.progressText.textContent = `${returns.size} coins loaded`;
+  return returns.size > 0;
+}
+
+// Coinbase path: stream fine-grained candles, top coins first.
+async function runCoinbase(tf, returns, token, onData) {
+  const [avail, ranked] = await Promise.all([loadAvailable(), loadRanked()]);
+  if (token !== scanToken) return;
+  const order = ranked && ranked.length ? ranked : Array.from(avail).sort();
+  const rest = order.filter((s) => avail.has(s) && !CONFIG.leaders.includes(s) && !CONFIG.exclude.has(s));
+  const universe = [...CONFIG.leaders.filter((l) => avail.has(l)), ...rest].slice(0, CONFIG.maxCoins);
+  el.progressText.textContent = `0 / ${universe.length} coins`;
+  await streamUniverse(universe, tf.granularity, returns, token, onData, (done, total, sym) => {
+    if (token !== scanToken) return;
+    el.progressFill.style.width = `${(done / total) * 100}%`;
+    el.progressText.textContent = `${done} / ${total} — ${sym}`;
+  });
+}
+
 async function scan() {
-  const token = ++scanToken;   // invalidate any in-flight older scan
-  scanning = true;
+  const token = ++scanToken;
   el.refresh.disabled = true;
   setStatus('working', 'Scanning…');
   el.progress.classList.remove('hidden');
+  el.progressFill.style.width = '0%';
 
   const tf = CONFIG.timeframes[el.timeframe.value];
   const returns = new Map();
@@ -336,9 +464,7 @@ async function scan() {
       el.coinCount.textContent = `${returns.size} coins analyzed · ${ROWS.length} laggards`;
     };
     if (force) { if (pending) { clearTimeout(pending); pending = null; } run(); return; }
-    // All-pairs is O(n²) over ~400 coins — too heavy to recompute mid-stream, so it only
-    // runs on the final pass. Leaders mode is cheap and updates live.
-    if (el.mode.value === 'pairs') return;
+    if (el.mode.value === 'pairs') return; // O(n²) — final pass only
     dirty = true;
     const since = performance.now() - lastRun;
     if (since >= CONFIG.reanalyzeMs) run();
@@ -346,42 +472,28 @@ async function scan() {
   };
 
   try {
-    const [avail, ranked] = await Promise.all([loadAvailable(), loadRanked()]);
+    if (tf.source === 'gecko') {
+      const ok = await runGecko(tf, returns, token);
+      if (token !== scanToken) return;
+      if (!ok) await runCoinbase(tf, returns, token, () => reanalyze(false)); // fallback
+    } else {
+      await runCoinbase(tf, returns, token, () => reanalyze(false));
+    }
     if (token !== scanToken) return;
 
-    // Order the field by liquidity (CoinGecko volume rank), keep only coins live on Coinbase,
-    // drop stablecoins, and cap at maxCoins. Leaders always go first. If the ranking call
-    // failed, fall back to Coinbase's full list alphabetically.
-    const order = ranked && ranked.length ? ranked : Array.from(avail).sort();
-    const rest = order.filter((s) => avail.has(s) && !CONFIG.leaders.includes(s) && !CONFIG.exclude.has(s));
-    const universe = [...CONFIG.leaders.filter((l) => avail.has(l)), ...rest].slice(0, CONFIG.maxCoins);
-
-    el.progressText.textContent = `0 / ${universe.length} coins`;
-    await streamUniverse(
-      universe, tf.granularity, returns, token,
-      () => reanalyze(false),
-      (done, total, sym) => {
-        if (token !== scanToken) return;
-        el.progressFill.style.width = `${(done / total) * 100}%`;
-        el.progressText.textContent = `${done} / ${total} — ${sym}`;
-      }
-    );
-    if (token !== scanToken) return;
-
-    reanalyze(true); // final, authoritative pass
+    reanalyze(true);
     el.lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
     setStatus('live', 'Live');
   } catch (e) {
     if (token !== scanToken) return;
     setStatus('error', 'Error');
     if (!ROWS.length) {
-      el.body.innerHTML = `<tr><td colspan="7" class="empty">Scan failed: ${e.message}. Coinbase may be rate-limiting — wait a moment and scan again.</td></tr>`;
+      el.body.innerHTML = `<tr><td colspan="8" class="empty">Scan failed: ${e.message}. The data source may be rate-limiting — wait a moment and scan again.</td></tr>`;
     }
   } finally {
     if (token === scanToken) {
       el.progress.classList.add('hidden');
       el.refresh.disabled = false;
-      scanning = false;
     }
   }
 }
@@ -400,7 +512,20 @@ function init() {
   });
   el.mode.addEventListener('change', scan);
   el.timeframe.addEventListener('change', scan);
-  el.refresh.addEventListener('click', () => { CACHE.clear(); scan(); }); // force fresh prices
+  el.refresh.addEventListener('click', () => { CACHE.clear(); MARKETS = null; scan(); });
+
+  // Compare buttons (event-delegated) + modal wiring.
+  el.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('button.cmp');
+    if (!btn) return;
+    const row = ROWS.find((r) => r.coin === btn.dataset.coin);
+    if (row) openModal(row);
+  });
+  el.modalClose.addEventListener('click', closeModal);
+  el.modal.addEventListener('click', (e) => { if (e.target === el.modal) closeModal(); });
+  el.alignLag.addEventListener('change', drawModal);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
   setStatus('', 'Idle');
   scan(); // auto-run on load
 }
