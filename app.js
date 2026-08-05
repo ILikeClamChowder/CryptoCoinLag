@@ -80,6 +80,7 @@ const el = {
   body: $('resultsBody'),
   signalsPanel: $('signalsPanel'), signalsBody: $('signalsBody'), signalsMeta: $('signalsMeta'),
   watchPanel: $('watchPanel'), watchBody: $('watchBody'), watchCount: $('watchCount'),
+  alertBtn: $('alertBtn'), alertThreshold: $('alertThreshold'), toasts: $('toasts'),
   modal: $('chartModal'), modalTitle: $('modalTitle'), modalStats: $('modalStats'),
   modalChart: $('modalChart'), modalClose: $('modalClose'), alignLag: $('alignLag'),
 };
@@ -570,6 +571,7 @@ async function scan() {
     if (token !== scanToken) return;
 
     reanalyze(true);
+    checkAlerts();
     el.lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
     setStatus('live', 'Live');
   } catch (e) {
@@ -584,6 +586,55 @@ async function scan() {
       el.refresh.disabled = false;
     }
   }
+}
+
+// ------------------------------- ALERTS (in-app, client-side) -------------------------------
+let ALERTS_ON = false;
+try { ALERTS_ON = localStorage.getItem('slipstream.alertsOn') === '1'; } catch {}
+
+const loadLastConf = () => { try { return JSON.parse(localStorage.getItem('slipstream.lastConf') || '{}'); } catch { return {}; } };
+const saveLastConf = (o) => { try { localStorage.setItem('slipstream.lastConf', JSON.stringify(o)); } catch {} };
+const alertThreshold = () => Number(el.alertThreshold.value) || 55;
+
+function toast(title, body) {
+  const d = document.createElement('div');
+  d.className = 'toast';
+  d.innerHTML = `<b>🔔 ${title}</b><small>${body}</small>`;
+  el.toasts.appendChild(d);
+  setTimeout(() => { d.style.opacity = '0'; setTimeout(() => d.remove(), 400); }, 9000);
+}
+
+function notify(title, body) {
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') new Notification(title, { body });
+  } catch {}
+}
+
+function updateAlertBtn() {
+  const granted = 'Notification' in window && Notification.permission === 'granted';
+  el.alertBtn.classList.toggle('on', ALERTS_ON);
+  el.alertBtn.textContent = ALERTS_ON ? (granted ? '🔔 Alerts on' : '🔔 Alerts on (in-app)') : '🔔 Enable alerts';
+}
+
+// Runs once at the end of each scan: notify when a watched match crosses the threshold upward.
+function checkAlerts() {
+  const tf = CONFIG.timeframes[el.timeframe.value];
+  const thr = alertThreshold();
+  const last = loadLastConf();
+  for (const k of WATCH) {
+    const [coin, leader] = k.split('|');
+    const s = statsFor(coin, leader);
+    if (!s) continue;
+    const prev = (k in last) ? last[k] : null;
+    if (ALERTS_ON && prev !== null && prev < thr && s.confidence >= thr && s.peakLag > 0) {
+      const title = `${coin} → ${leader} crossed ${thr}%`;
+      const body = `Now ${s.confidence.toFixed(0)}% (was ${prev.toFixed(0)}%) · ${fmtLag(s.peakLag, tf.granularity)}`;
+      toast(title, body);
+      notify(title, body);
+    }
+    last[k] = s.confidence;
+  }
+  saveLastConf(last);
 }
 
 // ------------------------------- SIGNALS (Path B backend) -------------------------------
@@ -650,6 +701,24 @@ function init() {
   el.modal.addEventListener('click', (e) => { if (e.target === el.modal) closeModal(); });
   el.alignLag.addEventListener('change', drawModal);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+  // Alerts wiring.
+  try { el.alertThreshold.value = localStorage.getItem('slipstream.alertThr') || '55'; } catch {}
+  el.alertThreshold.addEventListener('change', () => {
+    try { localStorage.setItem('slipstream.alertThr', el.alertThreshold.value); } catch {}
+  });
+  el.alertBtn.addEventListener('click', async () => {
+    if (ALERTS_ON) {
+      ALERTS_ON = false;
+      try { localStorage.setItem('slipstream.alertsOn', '0'); } catch {}
+    } else {
+      ALERTS_ON = true;
+      try { localStorage.setItem('slipstream.alertsOn', '1'); } catch {}
+      try { if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission(); } catch {}
+    }
+    updateAlertBtn();
+  });
+  updateAlertBtn();
 
   setStatus('', 'Idle');
   renderWatch(); // show any persisted watchlist immediately

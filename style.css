@@ -121,7 +121,21 @@ main { padding: 8px 22px 40px; }
 
 /* -------- watchlist panel -------- */
 .watch-panel { padding: 4px 22px 0; }
-.watch-title { font-size: 14px; color: #f472b6; margin: 16px 0 8px; letter-spacing: .3px; }
+.watch-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0 8px; }
+.watch-title { font-size: 14px; color: #f472b6; margin: 0; letter-spacing: .3px; }
+.alert-ctrl { display: flex; align-items: center; gap: 10px; }
+.alert-btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
+.alert-btn:hover { border-color: var(--muted); }
+.alert-btn.on { border-color: var(--good); color: var(--good); background: rgba(52,211,153,.10); }
+.alert-thr { font-size: 12px; color: var(--muted); }
+.alert-thr input { width: 54px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 4px 6px; font-size: 13px; }
+
+/* -------- toasts -------- */
+.toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 10px; z-index: 60; }
+.toast { background: var(--panel); border: 1px solid var(--good); border-left: 3px solid var(--good); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); max-width: 320px; transition: opacity .4s; animation: toastin .25s ease; }
+.toast b { color: var(--good); font-size: 14px; }
+.toast small { display: block; color: var(--muted); margin-top: 3px; font-size: 12px; }
+@keyframes toastin { from { opacity: 0; transform: translateY(8px); } }
 .watch-table { background: rgba(244,114,182,.04); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .watch-table th, .watch-table td { padding: 10px; }
 .muted-cell { color: var(--muted); font-size: 13px; }
