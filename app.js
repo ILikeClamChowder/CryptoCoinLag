@@ -21,6 +21,10 @@ const CONFIG = {
   quote: 'USD',
   leaders: ['BTC', 'ETH', 'SOL'],
 
+  // Path B backend (optional). Leave '' for pure client-side. Set to your deployed Worker URL
+  // (e.g. 'https://slipstream-worker.you.workers.dev') to show the server "Signals" panel.
+  workerBase: '',
+
   exclude: new Set([
     'USDT', 'USDC', 'DAI', 'PYUSD', 'GUSD', 'USDP', 'PAX', 'BUSD', 'UST', 'USTC',
     'LUSD', 'USDD', 'EURC', 'EUROC', 'GYEN', 'RLUSD', 'WBTC', 'CBETH', 'CBBTC',
@@ -74,6 +78,7 @@ const el = {
   statusDot: $('statusDot'), statusText: $('statusText'),
   progress: $('progress'), progressFill: $('progressFill'), progressText: $('progressText'),
   body: $('resultsBody'),
+  signalsPanel: $('signalsPanel'), signalsBody: $('signalsBody'), signalsMeta: $('signalsMeta'),
   watchPanel: $('watchPanel'), watchBody: $('watchBody'), watchCount: $('watchCount'),
   modal: $('chartModal'), modalTitle: $('modalTitle'), modalStats: $('modalStats'),
   modalChart: $('modalChart'), modalClose: $('modalClose'), alignLag: $('alignLag'),
@@ -581,6 +586,41 @@ async function scan() {
   }
 }
 
+// ------------------------------- SIGNALS (Path B backend) -------------------------------
+function fmtAgo(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 90) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.round(m / 60);
+  if (h < 24) return h + 'h ago';
+  return Math.round(h / 24) + 'd ago';
+}
+
+function renderSignals(signals, updatedAt) {
+  if (!signals || !signals.length) { el.signalsPanel.classList.add('hidden'); return; }
+  el.signalsPanel.classList.remove('hidden');
+  el.signalsMeta.textContent = updatedAt ? `server checked ${fmtAgo(updatedAt)}` : '';
+  el.signalsBody.innerHTML = signals.slice(0, 12).map((s) => {
+    const from = s.prevConfidence ? `${s.prevConfidence.toFixed(0)}%` : 'off-list';
+    return `<li>
+      <span class="sig-pair"><b>${s.coin}</b> → <span class="sig-leader">${s.leader}</span></span>
+      <span class="sig-jump">crossed to <b>${s.confidence.toFixed(0)}%</b> <small>(was ${from})</small></span>
+      <span class="sig-time">${fmtAgo(s.at)}</span>
+    </li>`;
+  }).join('');
+}
+
+async function loadSignals() {
+  if (!CONFIG.workerBase) return;
+  try {
+    const res = await fetch(`${CONFIG.workerBase.replace(/\/$/, '')}/api/signals`);
+    if (!res.ok) return;
+    const data = await res.json();
+    renderSignals(data.signals || [], data.updatedAt);
+  } catch { /* backend not reachable — stay silent, panel hidden */ }
+}
+
 // ------------------------------- INIT -------------------------------
 function init() {
   for (const [key, tf] of Object.entries(CONFIG.timeframes)) {
@@ -614,5 +654,9 @@ function init() {
   setStatus('', 'Idle');
   renderWatch(); // show any persisted watchlist immediately
   scan();        // auto-run on load
+
+  // Path B: pull server-detected signals now and refresh periodically (no-op if workerBase is '').
+  loadSignals();
+  if (CONFIG.workerBase) setInterval(loadSignals, 120000);
 }
 init();

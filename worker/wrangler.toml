@@ -1,0 +1,19 @@
+# Slipstream Worker — Path B backend
+# If you deploy via the Cloudflare dashboard editor you don't strictly need this file,
+# but it documents the cron + KV binding and is used by Workers Builds / wrangler.
+
+name = "slipstream-worker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Cron trigger: run the compute every 10 minutes.
+[triggers]
+crons = ["*/10 * * * *"]
+
+# KV namespace for snapshots + signals.
+# Create it in the dashboard (Storage & Databases > KV) or with:
+#   wrangler kv namespace create SNAPSHOTS
+# then paste the namespace id below (and bind it as SNAPSHOTS in the dashboard too).
+[[kv_namespaces]]
+binding = "SNAPSHOTS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

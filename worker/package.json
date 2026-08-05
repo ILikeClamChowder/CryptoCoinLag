@@ -1,0 +1,13 @@
+{
+  "name": "slipstream-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Slipstream Path B backend — cron + KV + signals API",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

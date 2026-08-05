@@ -106,6 +106,19 @@ main { padding: 8px 22px 40px; }
 .heart:hover { color: #f472b6; border-color: #f472b6; }
 .heart.on { color: #f472b6; border-color: #f472b6; background: rgba(244,114,182,.14); }
 
+/* -------- signals panel (Path B) -------- */
+.signals-panel { padding: 4px 22px 0; }
+.signals-head { display: flex; align-items: baseline; gap: 12px; margin: 16px 0 8px; }
+.signals-title { font-size: 14px; color: var(--accent-2); margin: 0; letter-spacing: .3px; }
+.signals-meta { font-size: 12px; color: var(--muted); }
+.signals-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: rgba(56,189,248,.04); }
+.signals-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 14px; }
+.signals-list li:last-child { border-bottom: none; }
+.sig-leader { color: var(--accent-2); font-weight: 600; }
+.sig-jump { color: var(--text); }
+.sig-jump small { color: var(--muted); }
+.sig-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+
 /* -------- watchlist panel -------- */
 .watch-panel { padding: 4px 22px 0; }
 .watch-title { font-size: 14px; color: #f472b6; margin: 16px 0 8px; letter-spacing: .3px; }
