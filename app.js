@@ -46,8 +46,25 @@ const CONFIG = {
 let AVAILABLE = null;             // Set of live base symbols on Coinbase (quote = USD)
 let MARKETS = null;               // cached CoinGecko /coins/markets response (ranking + sparklines)
 let ROWS = [];                    // last computed rows
+let DATA = new Map();             // most recent returns map — for on-demand stats (watchlist + modal)
 const CACHE = new Map();          // `${sym}|${granularity}` -> { closes:[], returns:[] }
 let scanToken = 0;                // bumped on every new scan so stale streams stop touching the UI
+
+// Watchlist: hearted coin→leader matches, persisted in localStorage so they survive refreshes.
+const WATCH_KEY = 'slipstream.watch';
+function loadWatch() {
+  try { return new Set(JSON.parse(localStorage.getItem(WATCH_KEY) || '[]')); } catch { return new Set(); }
+}
+function saveWatch() {
+  try { localStorage.setItem(WATCH_KEY, JSON.stringify([...WATCH])); } catch {}
+}
+let WATCH = loadWatch();          // Set of `${coin}|${leader}` keys
+const pairKey = (coin, leader) => `${coin}|${leader}`;
+function watchedSymbols() {       // every coin referenced by the watchlist (both sides)
+  const s = new Set();
+  for (const k of WATCH) { const [a, b] = k.split('|'); s.add(a); s.add(b); }
+  return s;
+}
 
 // ------------------------------- DOM -------------------------------
 const $ = (id) => document.getElementById(id);
@@ -57,6 +74,7 @@ const el = {
   statusDot: $('statusDot'), statusText: $('statusText'),
   progress: $('progress'), progressFill: $('progressFill'), progressText: $('progressText'),
   body: $('resultsBody'),
+  watchPanel: $('watchPanel'), watchBody: $('watchBody'), watchCount: $('watchCount'),
   modal: $('chartModal'), modalTitle: $('modalTitle'), modalStats: $('modalStats'),
   modalChart: $('modalChart'), modalClose: $('modalClose'), alignLag: $('alignLag'),
 };
@@ -315,7 +333,64 @@ function render() {
         <span class="conf-num" style="color:${c}">${r.confidence.toFixed(0)}%</span>
       </div></td>
       <td class="left">${sparkline(r.curve || [])}</td>
-      <td><button class="cmp" data-coin="${r.coin}" title="Compare ${r.coin} vs ${r.leader} side by side">⇋</button></td>
+      <td class="acts">
+        <button class="heart ${WATCH.has(pairKey(r.coin, r.leader)) ? 'on' : ''}" data-coin="${r.coin}" data-leader="${r.leader}" title="Watch this match">${WATCH.has(pairKey(r.coin, r.leader)) ? '♥' : '♡'}</button>
+        <button class="cmp" data-coin="${r.coin}" data-leader="${r.leader}" title="Compare ${r.coin} vs ${r.leader}">⇋</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// Current stats for any coin→leader pair, computed from the latest data (null if data missing).
+function statsFor(coin, leader) {
+  const tf = CONFIG.timeframes[el.timeframe.value];
+  const rx = DATA.get(coin), rl = DATA.get(leader);
+  if (!rx || !rl) return null;
+  return { coin, leader, ...scoreCurve(lagCurve(rx, rl, tf.maxLagCandles)) };
+}
+
+function toggleWatch(coin, leader) {
+  const k = pairKey(coin, leader);
+  if (WATCH.has(k)) WATCH.delete(k); else WATCH.add(k);
+  saveWatch();
+  render();       // refresh hearts in the main table
+  renderWatch();  // refresh the watch panel
+}
+
+// The pinned "Watching" panel — always shows hearted matches with their CURRENT stats,
+// regardless of the confidence filter or whether they made the main list this scan.
+function renderWatch() {
+  if (!WATCH.size) { el.watchPanel.classList.add('hidden'); return; }
+  el.watchPanel.classList.remove('hidden');
+  el.watchCount.textContent = `(${WATCH.size})`;
+  const tf = CONFIG.timeframes[el.timeframe.value];
+
+  const rows = [...WATCH].map((k) => {
+    const [coin, leader] = k.split('|');
+    return statsFor(coin, leader) || { coin, leader, missing: true };
+  }).sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
+  el.watchBody.innerHTML = rows.map((r) => {
+    const heart = `<button class="heart on" data-coin="${r.coin}" data-leader="${r.leader}" title="Stop watching">♥</button>`;
+    if (r.missing) {
+      return `<tr>
+        <td class="left"><span class="coin">${r.coin}</span></td>
+        <td class="left"><span class="leader-badge">${r.leader}</span></td>
+        <td colspan="3" class="muted-cell">no data this timeframe</td>
+        <td></td><td>${heart}</td></tr>`;
+    }
+    const c = confColor(r.confidence);
+    return `<tr>
+      <td class="left"><span class="coin">${r.coin}</span></td>
+      <td class="left"><span class="leader-badge">${r.leader}</span></td>
+      <td class="lag">${r.peakLag === 0 ? '<small>coincident</small>' : fmtLag(r.peakLag, tf.granularity)}</td>
+      <td class="match">${(r.peakCorr * 100).toFixed(0)}%</td>
+      <td><div class="conf-wrap">
+        <div class="conf-bar"><i style="width:${Math.min(100, r.confidence)}%;background:${c}"></i></div>
+        <span class="conf-num" style="color:${c}">${r.confidence.toFixed(0)}%</span>
+      </div></td>
+      <td><button class="cmp" data-coin="${r.coin}" data-leader="${r.leader}" title="Compare">⇋</button></td>
+      <td>${heart}</td>
     </tr>`;
   }).join('');
 }
@@ -388,10 +463,12 @@ function drawModal() {
     <span class="pill">confidence ${row.confidence.toFixed(0)}%</span>`;
 }
 
-function openModal(row) {
+function openModal(coin, leader) {
+  const row = statsFor(coin, leader);
+  if (!row) return;
   const tf = CONFIG.timeframes[el.timeframe.value];
-  modalCtx = { coin: row.coin, leader: row.leader, lag: row.peakLag, granularity: tf.granularity, row };
-  el.modalTitle.textContent = `${row.coin} vs ${row.leader}`;
+  modalCtx = { coin, leader, lag: row.peakLag, granularity: tf.granularity, row };
+  el.modalTitle.textContent = `${coin} vs ${leader}`;
   el.alignLag.checked = row.peakLag > 0;
   drawModal();
   el.modal.classList.remove('hidden');
@@ -408,16 +485,17 @@ async function runGecko(tf, returns, token) {
   if (token !== scanToken) return true;
   if (!markets.length) return false;
 
+  const need = watchedSymbols();
   const seen = new Set();
   for (const m of markets) {
     const sym = (m.symbol || '').toUpperCase();
     const prices = m.sparkline_in_7d && m.sparkline_in_7d.price;
     if (!sym || seen.has(sym) || CONFIG.exclude.has(sym)) continue;
     if (!Array.isArray(prices) || prices.length < CONFIG.minOverlap + 5) continue;
+    if (returns.size >= CONFIG.maxCoins && !need.has(sym)) continue; // keep watched coins beyond the cap
     seen.add(sym);
     const entry = cachePut(sym, tf.granularity, prices);
     returns.set(sym, entry.returns);
-    if (returns.size >= CONFIG.maxCoins) break;
   }
   el.progressFill.style.width = '100%';
   el.progressText.textContent = `${returns.size} coins loaded`;
@@ -430,7 +508,9 @@ async function runCoinbase(tf, returns, token, onData) {
   if (token !== scanToken) return;
   const order = ranked && ranked.length ? ranked : Array.from(avail).sort();
   const rest = order.filter((s) => avail.has(s) && !CONFIG.leaders.includes(s) && !CONFIG.exclude.has(s));
-  const universe = [...CONFIG.leaders.filter((l) => avail.has(l)), ...rest].slice(0, CONFIG.maxCoins);
+  const base = [...CONFIG.leaders.filter((l) => avail.has(l)), ...rest].slice(0, CONFIG.maxCoins);
+  const extra = [...watchedSymbols()].filter((s) => avail.has(s) && !base.includes(s)); // watched coins beyond the cap
+  const universe = [...base, ...extra];
   el.progressText.textContent = `0 / ${universe.length} coins`;
   await streamUniverse(universe, tf.granularity, returns, token, onData, (done, total, sym) => {
     if (token !== scanToken) return;
@@ -448,8 +528,10 @@ async function scan() {
 
   const tf = CONFIG.timeframes[el.timeframe.value];
   const returns = new Map();
+  DATA = returns;
   ROWS = [];
   render();
+  renderWatch();
 
   // Throttled recompute so the table fills in and re-ranks live without janking.
   let lastRun = 0, pending = null, dirty = false;
@@ -461,6 +543,7 @@ async function scan() {
         ? analyzePairs(returns, tf.maxLagCandles)
         : analyzeLeaders(returns, tf.maxLagCandles);
       render();
+      renderWatch();
       el.coinCount.textContent = `${returns.size} coins analyzed · ${ROWS.length} laggards`;
     };
     if (force) { if (pending) { clearTimeout(pending); pending = null; } run(); return; }
@@ -514,19 +597,22 @@ function init() {
   el.timeframe.addEventListener('change', scan);
   el.refresh.addEventListener('click', () => { CACHE.clear(); MARKETS = null; scan(); });
 
-  // Compare buttons (event-delegated) + modal wiring.
-  el.body.addEventListener('click', (e) => {
-    const btn = e.target.closest('button.cmp');
-    if (!btn) return;
-    const row = ROWS.find((r) => r.coin === btn.dataset.coin);
-    if (row) openModal(row);
-  });
+  // Compare + heart buttons (event-delegated on both tables) + modal wiring.
+  const onActionClick = (e) => {
+    const cmp = e.target.closest('button.cmp');
+    if (cmp) { openModal(cmp.dataset.coin, cmp.dataset.leader); return; }
+    const heart = e.target.closest('button.heart');
+    if (heart) toggleWatch(heart.dataset.coin, heart.dataset.leader);
+  };
+  el.body.addEventListener('click', onActionClick);
+  el.watchBody.addEventListener('click', onActionClick);
   el.modalClose.addEventListener('click', closeModal);
   el.modal.addEventListener('click', (e) => { if (e.target === el.modal) closeModal(); });
   el.alignLag.addEventListener('change', drawModal);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
   setStatus('', 'Idle');
-  scan(); // auto-run on load
+  renderWatch(); // show any persisted watchlist immediately
+  scan();        // auto-run on load
 }
 init();

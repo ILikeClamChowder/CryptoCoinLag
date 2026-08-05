@@ -95,11 +95,23 @@ main { padding: 8px 22px 40px; }
 
 .spark { height: 26px; }
 
-.cmp {
-  background: var(--panel-2); color: var(--accent); border: 1px solid var(--border);
+.acts { white-space: nowrap; }
+.cmp, .heart {
+  background: var(--panel-2); border: 1px solid var(--border);
   border-radius: 7px; width: 34px; height: 30px; font-size: 15px; cursor: pointer; line-height: 1;
 }
+.cmp { color: var(--accent); }
 .cmp:hover { border-color: var(--accent); background: rgba(94,234,212,.12); }
+.heart { color: var(--muted); margin-right: 4px; }
+.heart:hover { color: #f472b6; border-color: #f472b6; }
+.heart.on { color: #f472b6; border-color: #f472b6; background: rgba(244,114,182,.14); }
+
+/* -------- watchlist panel -------- */
+.watch-panel { padding: 4px 22px 0; }
+.watch-title { font-size: 14px; color: #f472b6; margin: 16px 0 8px; letter-spacing: .3px; }
+.watch-table { background: rgba(244,114,182,.04); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.watch-table th, .watch-table td { padding: 10px; }
+.muted-cell { color: var(--muted); font-size: 13px; }
 
 /* -------- compare modal -------- */
 .modal {

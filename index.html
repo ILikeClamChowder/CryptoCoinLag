@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Slipstream — Crypto Lag Radar</title>
   <meta name="description" content="Finds crypto coins that trail the market leaders — detecting lead-lag patterns and ranking them by confidence." />
-  <link rel="stylesheet" href="style.css?v=5" />
+  <link rel="stylesheet" href="style.css?v=6" />
 </head>
 <body>
   <header class="topbar">
@@ -50,6 +50,24 @@
     <span id="progressText"></span>
   </div>
 
+  <section id="watchPanel" class="watch-panel hidden">
+    <h2 class="watch-title">♥ Watching <span id="watchCount"></span></h2>
+    <table class="results watch-table">
+      <thead>
+        <tr>
+          <th class="left">Coin</th>
+          <th class="left">Follows</th>
+          <th>Lag</th>
+          <th>Match</th>
+          <th>Confidence</th>
+          <th>Chart</th>
+          <th>Remove</th>
+        </tr>
+      </thead>
+      <tbody id="watchBody"></tbody>
+    </table>
+  </section>
+
   <main>
     <table id="results" class="results">
       <thead>
@@ -87,6 +105,6 @@
     <p><b>This is a pattern-research tool, not financial advice.</b> Crypto is heavily correlated, and lead-lag relationships are unstable — a lag that shows up today often disappears tomorrow. Nothing here is a signal to trade on. Data from Coinbase's public API; correlations are computed live in your browser and stored nowhere.</p>
   </footer>
 
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
