@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Slipstream — Crypto Lag Radar</title>
+  <meta name="description" content="Finds crypto coins that trail the market leaders — detecting lead-lag patterns and ranking them by confidence." />
+  <link rel="stylesheet" href="style.css?v=4" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◑</span>
+      <div>
+        <h1>Slipstream</h1>
+        <p class="tag">Crypto lag radar — who's trailing the leaders</p>
+      </div>
+    </div>
+    <div class="status">
+      <span id="statusDot" class="dot"></span>
+      <span id="statusText">Idle</span>
+    </div>
+  </header>
+
+  <section class="controls">
+    <div class="ctrl">
+      <label for="timeframe">Timeframe</label>
+      <select id="timeframe"></select>
+    </div>
+    <div class="ctrl">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="leaders">Leaders (BTC · ETH · SOL)</option>
+        <option value="pairs">All-pairs discovery</option>
+      </select>
+    </div>
+    <div class="ctrl">
+      <label for="minConf">Min confidence: <span id="minConfVal">0</span>%</label>
+      <input id="minConf" type="range" min="0" max="90" step="5" value="0" />
+    </div>
+    <button id="refresh" class="btn">↻ Scan now</button>
+    <div class="meta">
+      <span id="lastUpdated">—</span>
+      <span id="coinCount"></span>
+    </div>
+  </section>
+
+  <div id="progress" class="progress hidden">
+    <div class="bar"><div id="progressFill" class="fill"></div></div>
+    <span id="progressText"></span>
+  </div>
+
+  <main>
+    <table id="results" class="results">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th class="left">Coin</th>
+          <th class="left">Follows</th>
+          <th>Lag</th>
+          <th>Match <span class="hint" title="Peak correlation of the coin's moves against the leader at the best lag">ⓘ</span></th>
+          <th>Confidence <span class="hint" title="Rewards a sharp peak at a specific lag; penalizes coins that just co-move with everything">ⓘ</span></th>
+          <th class="left">Lag profile</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody">
+        <tr><td colspan="7" class="empty">Press <b>Scan now</b> to pull live data and hunt for laggards.</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <footer class="disclaimer">
+    <p><b>This is a pattern-research tool, not financial advice.</b> Crypto is heavily correlated, and lead-lag relationships are unstable — a lag that shows up today often disappears tomorrow. Nothing here is a signal to trade on. Data from Coinbase's public API; correlations are computed live in your browser and stored nowhere.</p>
+  </footer>
+
+  <script src="app.js?v=4"></script>
+</body>
+</html>
