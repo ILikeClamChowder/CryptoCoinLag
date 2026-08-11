@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Slipstream — Strategy Backtest</title>
+<style>
+  body { margin:0; font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, Arial, sans-serif;
+    background:#0b0f17; color:#e6edf6; padding:22px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:#8ba0bd; font-size:13px; margin:0 0 18px; }
+  #status { color:#5eead4; font-size:13px; margin:10px 0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0; }
+  .stat { background:#131a26; border:1px solid #263247; border-radius:10px; padding:12px 14px; }
+  .stat .k { color:#8ba0bd; font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
+  .stat .v { font-size:22px; font-weight:700; margin-top:4px; font-variant-numeric:tabular-nums; }
+  .pos { color:#34d399; } .neg { color:#f87171; }
+  table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+  th,td { padding:7px 8px; border-bottom:1px solid #263247; text-align:right; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align:left; }
+  th { color:#8ba0bd; font-size:11px; text-transform:uppercase; }
+  #equity { background:#131a26; border:1px solid #263247; border-radius:10px; margin:8px 0 20px; }
+  .muted { color:#8ba0bd; }
+</style>
+</head>
+<body>
+<h1>Slipstream — Strategy Backtest</h1>
+<p class="sub">Walk-forward paper test of the lag-follow strategy on Coinbase hourly data. No lookahead: lags are detected on a trailing window, trades play out on later candles.</p>
+<div id="status">Loading…</div>
+<div id="summary"></div>
+<svg id="equity" viewBox="0 0 900 240" width="100%" style="display:none"></svg>
+<div id="trades"></div>
+
+<script>
+// ---------------- config ----------------
+const CFG = {
+  apiBase: 'https://api.exchange.coinbase.com',
+  quote: 'USD',
+  leaders: ['BTC','ETH','SOL'],
+  universe: ['BTC','ETH','SOL','XRP','ADA','DOGE','AVAX','LINK','DOT','LTC',
+    'ATOM','NEAR','APT','ARB','OP','SUI','SEI','INJ'],
+  gran: 300,           // 5-minute — where short lead-lag could actually exist
+  chunks: 6,           // 6 x 300 = ~1800 candles (~6 days)
+  trainWin: 288,       // 1 day (24h) of 5-min bars for lag detection
+  retrainEvery: 72,    // recompute the lag table every 6h
+  maxLag: 24, minOverlap: 60,   // lags of 1..24 bars = 5min..2h
+  confT: 18,           // only trade lagged pairs with >= this confidence
+  entryFloor: 0.008,   // leader must have moved >=0.8% over the lag window to trigger
+  tp: 0.025, sl: 0.02, // take-profit / stop-loss
+  fee: 0.001,          // per side (0.1%) => 0.2% round trip
+  bankroll: 10000, riskFrac: 0.10, maxOpen: 8,
+};
+
+// ---------------- math ----------------
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+function toReturns(c){ const r=new Array(c.length-1); for(let i=1;i<c.length;i++){const p=c[i-1]; r[i-1]=p?(c[i]-p)/p:0;} return r; }
+function corr(rx,rl,k,minO){ const n=Math.min(rx.length,rl.length),m=n-k; if(m<minO)return NaN;
+  let sx=0,sy=0; for(let t=k;t<n;t++){sx+=rx[t];sy+=rl[t-k];} const mx=sx/m,my=sy/m;
+  let nu=0,dx=0,dy=0; for(let t=k;t<n;t++){const a=rx[t]-mx,b=rl[t-k]-my; nu+=a*b;dx+=a*a;dy+=b*b;}
+  const d=Math.sqrt(dx*dy); return d?nu/d:0; }
+function score(rx,rl,maxLag,minO){ let pc=-Infinity,pl=0,s=0,c=0;
+  for(let k=0;k<=maxLag;k++){const v=corr(rx,rl,k,minO); if(Number.isNaN(v))continue; s+=v;c++; if(v>pc){pc=v;pl=k;}}
+  if(!c||pc<=0)return{confidence:0,peakLag:0};
+  const mean=s/c,st=Math.min(1,pc),sh=Math.min(1,Math.max(0,(pc-mean)/0.3)),lf=pl===0?0.35:1;
+  return{confidence:Math.round(100*Math.pow(st,1.5)*(0.35+0.65*sh)*lf*10)/10,peakLag:pl}; }
+
+// ---------------- data ----------------
+async function fetchJSON(url,tries=4){ for(let i=0;i<tries;i++){ try{
+  const r=await fetch(url); if(r.status===429){await sleep(700*(i+1));continue;} if(!r.ok)throw 0; return await r.json();
+}catch(e){ if(i===tries-1)return null; await sleep(400);} } return null; }
+
+async function fetchHistory(sym){
+  // paginate backwards to assemble ~chunks*300 hourly closes
+  const out=new Map(); const nowSec=Math.floor(Date.now()/1000);
+  for(let i=0;i<CFG.chunks;i++){
+    const end=nowSec - i*300*CFG.gran, start=end-300*CFG.gran;
+    const url=`${CFG.apiBase}/products/${sym}-${CFG.quote}/candles?granularity=${CFG.gran}&start=${start}&end=${end}`;
+    const raw=await fetchJSON(url);
+    if(Array.isArray(raw)) for(const row of raw) out.set(row[0], row[4]); // time -> close
+    await sleep(180);
+  }
+  if(out.size < CFG.trainWin+48) return null;
+  return out; // Map: time(sec) -> close
+}
+
+// ---------------- backtest ----------------
+function drawEquity(curve, benchmark){
+  const el=document.getElementById('equity'); el.style.display='block';
+  const w=900,h=240,pad=30; const all=curve.concat(benchmark);
+  const lo=Math.min(...all), hi=Math.max(...all), rng=(hi-lo)||1;
+  const X=i=>pad+(i/(curve.length-1))*(w-2*pad), Y=v=>h-pad-((v-lo)/rng)*(h-2*pad);
+  const line=(arr,color,dash)=>`<path d="${arr.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="1.8" stroke-dasharray="${dash||''}"/>`;
+  const y0=Y(CFG.bankroll);
+  el.innerHTML=`<line x1="${pad}" y1="${y0}" x2="${w-pad}" y2="${y0}" stroke="#3a465c" stroke-dasharray="3 3"/>
+    <text x="${pad}" y="${y0-4}" fill="#8ba0bd" font-size="10">start $${CFG.bankroll}</text>
+    ${line(benchmark,'#64748b','5 4')}${line(curve,'#5eead4')}
+    <text x="${w-pad}" y="16" fill="#5eead4" font-size="11" text-anchor="end">strategy</text>
+    <text x="${w-pad}" y="30" fill="#64748b" font-size="11" text-anchor="end">hold BTC (dashed)</text>`;
+}
+
+async function run(){
+  const st=document.getElementById('status');
+  st.textContent='Fetching history…';
+  const raw=new Map(); let got=0;
+  for(const sym of CFG.universe){ const h=await fetchHistory(sym); if(h) raw.set(sym,h); st.textContent=`Fetching history… ${++got}/${CFG.universe.length} (${sym})`; }
+
+  // Align every coin onto a common hourly grid by TIMESTAMP (forward-fill), so index t = same
+  // real time for all coins even when Coinbase drops the odd hour.
+  const firsts=[], lasts=[];
+  for(const [,m] of raw){ const ts=[...m.keys()]; firsts.push(Math.min(...ts)); lasts.push(Math.max(...ts)); }
+  const tMin=Math.max(...firsts), tMax=Math.min(...lasts);
+  const grid=[]; for(let t=tMin;t<=tMax;t+=CFG.gran) grid.push(t);
+  const closes=new Map();
+  for(const [sym,m] of raw){
+    const ts=[...m.keys()].sort((a,b)=>a-b); let j=0, last=m.get(ts[0]); const arr=[];
+    for(const g of grid){ while(j<ts.length && ts[j]<=g){ last=m.get(ts[j]); j++; } arr.push(last); }
+    closes.set(sym, arr);
+  }
+  const N=grid.length;
+  if(!closes.has('BTC') || N < CFG.trainWin+48){ st.textContent='Not enough aligned data.'; return; }
+  const returns=new Map(); for(const[k,v] of closes) returns.set(k, toReturns(v)); // length N-1
+  st.textContent=`Loaded ${closes.size} coins, ${N} hourly candles. Simulating…`;
+  await sleep(30);
+
+  const leaders=CFG.leaders.filter(l=>closes.has(l));
+  const diag={retrains:0, lagSizes:[], floorRejects:0, entries:0};
+  let cash=CFG.bankroll; const open=[]; const trades=[]; const equityCurve=[]; const btcCurve=[];
+  const btc=closes.get('BTC'); const btc0=btc[CFG.trainWin];
+  let lagTable=null; // coin -> {leader, lag, confidence}
+
+  const rSlice = (sym,a,b)=> returns.get(sym).slice(a,b); // returns indices align to closes index+1; we use close-index space
+
+  for(let t=CFG.trainWin; t<N-1; t++){
+    // ---- retrain lag table on trailing window [t-trainWin, t] ----
+    if(!lagTable || (t-CFG.trainWin)%CFG.retrainEvery===0){
+      lagTable=new Map();
+      for(const [sym] of closes){ if(CFG.leaders.includes(sym))continue;
+        const rx=returns.get(sym).slice(t-CFG.trainWin, t); // ~trainWin returns up to t-1
+        let best=null;
+        for(const L of leaders){ const rl=returns.get(L).slice(t-CFG.trainWin, t);
+          const s=score(rx,rl,CFG.maxLag,CFG.minOverlap);
+          // only consider LAGGED matches (peakLag>=1) — a coincident best would just be beta
+          if(s.peakLag>=1 && (!best||s.confidence>best.confidence)) best={...s,leader:L}; }
+        if(best && best.confidence>=CFG.confT) lagTable.set(sym,best);
+      }
+      diag.retrains++; diag.lagSizes.push(lagTable.size);
+    }
+    // ---- manage open positions (exit) ----
+    for(let i=open.length-1;i>=0;i--){ const p=open[i]; const px=closes.get(p.coin)[t];
+      const ret=p.dir*(px-p.entry)/p.entry; let done=false,reason='';
+      if(ret>=CFG.tp){done=true;reason='tp';} else if(ret<=-CFG.sl){done=true;reason='sl';}
+      else if(t>=p.exitBy){done=true;reason='time';}
+      if(done){ const pnl=p.notional*ret - 2*p.notional*CFG.fee; cash+=p.notional+pnl;
+        trades.push({coin:p.coin,leader:p.leader,dir:p.dir,retPct:ret*100,pnl,reason,conf:p.conf,lag:p.lag});
+        open.splice(i,1); }
+    }
+    // ---- entries ----
+    if(open.length<CFG.maxOpen){
+      for(const [sym,info] of lagTable){
+        if(open.some(o=>o.coin===sym)) continue;
+        const k=info.lag, Lc=closes.get(info.leader);
+        if(t-k<0) continue;
+        const leadMove=(Lc[t]-Lc[t-k])/Lc[t-k];       // the move the follower is expected to echo
+        if(Math.abs(leadMove)<CFG.entryFloor){ diag.floorRejects++; continue; }
+        const entryPx=closes.get(sym)[t];
+        if(!isFinite(entryPx) || entryPx<=0) continue;
+        const equity=cash+open.reduce((s,o)=>s+o.notional,0);
+        const notional=Math.min(equity*CFG.riskFrac*(info.confidence/100), cash);
+        if(!isFinite(notional) || notional<50) continue;
+        cash-=notional;
+        open.push({coin:sym,leader:info.leader,dir:Math.sign(leadMove),entry:entryPx,
+          notional,exitBy:t+k,conf:info.confidence,lag:k}); diag.entries++;
+        if(open.length>=CFG.maxOpen) break;
+      }
+    }
+    equityCurve.push(cash+open.reduce((s,o)=>s+o.notional,0));
+    btcCurve.push(CFG.bankroll*(btc[t]/btc0));
+  }
+  // force close leftovers at last price
+  const last=N-1;
+  for(const p of open){ const px=closes.get(p.coin)[last]; const ret=p.dir*(px-p.entry)/p.entry;
+    const pnl=p.notional*ret-2*p.notional*CFG.fee; cash+=p.notional+pnl;
+    trades.push({coin:p.coin,leader:p.leader,dir:p.dir,retPct:ret*100,pnl,reason:'end',conf:p.conf,lag:p.lag}); }
+
+  // ---- metrics ----
+  const finalEq=cash; const totRet=(finalEq/CFG.bankroll-1)*100;
+  const wins=trades.filter(t=>t.pnl>0).length; const wr=trades.length?100*wins/trades.length:0;
+  const avg=trades.length?trades.reduce((s,t)=>s+t.retPct,0)/trades.length:0;
+  let peak=-Infinity,mdd=0; for(const v of equityCurve){ if(v>peak)peak=v; const dd=(peak-v)/peak; if(dd>mdd)mdd=dd; }
+  const btcRet=(btc[last]/btc0-1)*100;
+  const days=(N-CFG.trainWin)/(86400/CFG.gran);
+
+  drawEquity(equityCurve, btcCurve);
+  const cls=v=>v>=0?'pos':'neg', sgn=v=>(v>=0?'+':'')+v.toFixed(1);
+  document.getElementById('summary').innerHTML=`<div class="grid">
+    <div class="stat"><div class="k">Strategy return</div><div class="v ${cls(totRet)}">${sgn(totRet)}%</div></div>
+    <div class="stat"><div class="k">Hold BTC (same period)</div><div class="v ${cls(btcRet)}">${sgn(btcRet)}%</div></div>
+    <div class="stat"><div class="k">Trades</div><div class="v">${trades.length}</div></div>
+    <div class="stat"><div class="k">Win rate</div><div class="v">${wr.toFixed(0)}%</div></div>
+    <div class="stat"><div class="k">Avg trade</div><div class="v ${cls(avg)}">${sgn(avg)}%</div></div>
+    <div class="stat"><div class="k">Max drawdown</div><div class="v neg">-${(mdd*100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="k">Test window</div><div class="v">${days.toFixed(0)}d</div></div>
+    <div class="stat"><div class="k">Final equity</div><div class="v">$${finalEq.toFixed(0)}</div></div>
+  </div>`;
+  const byCoin={}; for(const t of trades){ (byCoin[t.coin] ||= {n:0,pnl:0}); byCoin[t.coin].n++; byCoin[t.coin].pnl+=t.pnl; }
+  const rows=Object.entries(byCoin).sort((a,b)=>b[1].pnl-a[1].pnl).map(([c,d])=>
+    `<tr><td>${c}</td><td>${d.n}</td><td class="${cls(d.pnl)}">${sgn(d.pnl/1)}</td></tr>`).join('');
+  document.getElementById('trades').innerHTML=`<h3 style="font-size:14px;color:#8ba0bd">P&L by coin</h3>
+    <table><thead><tr><th>Coin</th><th>Trades</th><th>Net P&L ($)</th></tr></thead><tbody>${rows}</tbody></table>`;
+  st.textContent=`Done — ${trades.length} trades over ${days.toFixed(0)} days across ${closes.size} coins.`;
+
+  window.RESULT={ totRet:+totRet.toFixed(1), btcRet:+btcRet.toFixed(1), trades:trades.length, winRate:+wr.toFixed(0),
+    avgTrade:+avg.toFixed(2), maxDD:+(mdd*100).toFixed(1), days:+days.toFixed(0), finalEq:+finalEq.toFixed(0),
+    coins:closes.size, candles:N, avgLagPool:+(diag.lagSizes.reduce((s,v)=>s+v,0)/(diag.lagSizes.length||1)).toFixed(1), floorRejects:diag.floorRejects, entries:diag.entries, topCoins:Object.entries(byCoin).sort((a,b)=>b[1].pnl-a[1].pnl).slice(0,5).map(([c,d])=>`${c}:${d.pnl.toFixed(0)}`),
+    worstCoins:Object.entries(byCoin).sort((a,b)=>a[1].pnl-b[1].pnl).slice(0,5).map(([c,d])=>`${c}:${d.pnl.toFixed(0)}`) };
+}
+run().catch(e=>{document.getElementById('status').textContent='Error: '+e;});
+</script>
+</body>
+</html>
